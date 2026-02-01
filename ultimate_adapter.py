@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -88,10 +89,10 @@ class UltimateAdapter:
     """
 
     def __init__(
-        self,
-        ultimate_backend_url: str,
-        default_username: str = "user",
-        default_password: str = "pass",
+            self,
+            ultimate_backend_url: str,
+            default_username: str = "user",
+            default_password: str = "pass",
     ):
 
         self.ultimate_backend_url = ultimate_backend_url.rstrip("/")
@@ -119,11 +120,11 @@ class UltimateAdapter:
         logger.info(init_msg)
 
     def _make_request(
-        self,
-        endpoint: str,
-        method: str = "GET",
-        params: Optional[Dict] = None,
-        data: Optional[Dict] = None,
+            self,
+            endpoint: str,
+            method: str = "GET",
+            params: Optional[Dict] = None,
+            data: Optional[Dict] = None,
     ) -> Optional[Dict]:
         """Make HTTP request to Ultimate Backend"""
         url = f"{self.ultimate_backend_url}/{endpoint.lstrip('/')}"
@@ -132,10 +133,14 @@ class UltimateAdapter:
 
         try:
             if method == "GET":
-                response = requests.get(url, params=params, headers=headers, timeout=15)
+                response = requests.get(
+                    url, params=params, headers=headers, timeout=(10, 60)
+                )
             elif method == "POST":
                 headers["Content-Type"] = "application/json"
-                response = requests.post(url, json=data, headers=headers, timeout=15)
+                response = requests.post(
+                    url, json=data, headers=headers, timeout=(10, 60)
+                )
             else:
                 raise ValueError(f"Unsupported method: {method}")
 
@@ -212,7 +217,7 @@ class UltimateAdapter:
         }
 
     def get_categories(
-        self, stream_type: StreamType = StreamType.LIVE
+            self, stream_type: StreamType = StreamType.LIVE
     ) -> List[Category]:
         """Get categories (providers become categories)"""
         cache_key = "categories"
@@ -251,15 +256,123 @@ class UltimateAdapter:
         return categories
 
     def get_channels(self, category_id: Optional[str] = None) -> List[Channel]:
-        """Get all channels, optionally filtered by category"""
+        """Get channels, optionally filtered by category"""
+
+        # If specific category requested, use lazy loading
+        if category_id and category_id != "0":
+            return self._get_channels_for_category(category_id)
+
+        # Load all channels (for category "0" or no category)
         cache_key = "channels"
 
         # Check cache
         if self.cache[cache_key]["data"]:
             cache_age = time.time() - self.cache[cache_key]["timestamp"]
             if cache_age < 300:  # 5 minutes
-                channels = self.cache[cache_key]["data"]
-                return self._filter_channels_by_category(channels, category_id)
+                return self.cache[cache_key]["data"]
+
+        return self._load_all_channels()
+
+    def _get_channels_for_category(self, category_id: str) -> List[Channel]:
+        """Load channels only for specific category (lazy loading)"""
+        cache_key = f"channels_cat_{category_id}"
+
+        # Check cache
+        if cache_key not in self.cache:
+            self.cache[cache_key] = {"data": None, "timestamp": 0}
+
+        if self.cache[cache_key]["data"]:
+            cache_age = time.time() - self.cache[cache_key]["timestamp"]
+            if cache_age < 300:  # 5 minutes
+                return self.cache[cache_key]["data"]
+
+        if not self._load_providers():
+            return []
+
+        providers = self.cache["providers"]["data"]
+
+        # Find the provider for this category
+        try:
+            provider_idx = int(category_id)
+            if provider_idx < 1 or provider_idx > len(providers):
+                logger.warning(f"Invalid category_id: {category_id}")
+                return []
+            provider = providers[provider_idx - 1]
+        except (ValueError, IndexError) as e:
+            logger.warning(f"Error parsing category_id {category_id}: {e}")
+            return []
+
+        provider_name = provider.get("name")
+        provider_label = provider.get("label", provider_name)
+
+        logger.info(f"Loading channels for category {category_id} "
+                    f"(provider: {provider_name})")
+
+        channels = []
+        stream_counter = 1
+
+        try:
+            endpoint = f"/api/providers/{provider_name}/channels"
+            response = self._make_request(endpoint)
+
+            if not response or "channels" not in response:
+                logger.warning(f"No channels found for provider: "
+                               f"{provider_name}")
+                return []
+
+            for channel_data in response["channels"]:
+                # Backend uses capitalized fields: Name, Id, LogoUrl
+                channel_id = channel_data.get("Id", "")
+                channel_name = channel_data.get("Name", "Unknown")
+                channel_logo = channel_data.get("LogoUrl", "")
+
+                # Skip radio channels (optional)
+                if channel_data.get("IsRadio", False):
+                    continue
+
+                # Create stream URL
+                stream_url = (
+                    f"{self.ultimate_backend_url}/api/providers/"
+                    f"{provider_name}/channels/{channel_id}/"
+                    f"stream/decrypted/index.mpd"
+                )
+
+                # Create channel object
+                channel = Channel(
+                    stream_id=stream_counter,
+                    num=stream_counter,
+                    name=channel_name,
+                    stream_icon=channel_logo,
+                    category_id=category_id,
+                    category_name=provider_label,
+                    epg_channel_id=channel_id,
+                    direct_source=stream_url,
+                    provider_name=provider_name,
+                    original_channel_id=channel_id,
+                )
+
+                channels.append(channel)
+                stream_counter += 1
+
+        except Exception as e:
+            logger.error(f"Error fetching channels for {provider_name}: {e}")
+            return []
+
+        # Cache the result
+        self.cache[cache_key]["data"] = channels
+        self.cache[cache_key]["timestamp"] = time.time()
+
+        logger.info(f"Loaded {len(channels)} channels for category "
+                    f"{category_id}")
+
+        return channels
+
+    def _load_all_channels(self) -> List[Channel]:
+        """Load channels from all providers"""
+
+    def _load_all_channels(self) -> List[Channel]:
+        """Load channels from all providers"""
+        cache_key = "channels"
 
         if not self._load_providers():
             return []
@@ -268,6 +381,8 @@ class UltimateAdapter:
         stream_counter = 1
 
         providers = self.cache["providers"]["data"]
+
+        logger.info(f"Loading channels from all {len(providers)} providers...")
 
         for provider_idx, provider in enumerate(providers, 1):
             provider_name = provider.get("name")
@@ -289,6 +404,10 @@ class UltimateAdapter:
                     channel_id = channel_data.get("Id", "")
                     channel_name = channel_data.get("Name", "Unknown")
                     channel_logo = channel_data.get("LogoUrl", "")
+
+                    # Skip radio channels (optional)
+                    if channel_data.get("IsRadio", False):
+                        continue
 
                     # Create stream URL
                     stream_url = (
@@ -335,7 +454,7 @@ class UltimateAdapter:
         return self._filter_channels_by_category(all_channels, category_id)
 
     def _filter_channels_by_category(
-        self, channels: List[Channel], category_id: Optional[str]
+            self, channels: List[Channel], category_id: Optional[str]
     ) -> List[Channel]:
         """Filter channels by category ID"""
         if not category_id or category_id == "0":
@@ -364,7 +483,7 @@ class UltimateAdapter:
         return None
 
     def get_epg(
-        self, stream_id: Optional[int] = None, limit: int = 12
+            self, stream_id: Optional[int] = None, limit: int = 12
     ) -> List[EPGProgram]:
         """Get EPG data for a channel or all channels"""
         cache_key = "epg"
@@ -495,7 +614,7 @@ class UltimateAdapter:
         return xmltv
 
     def get_stream_url(
-        self, username: str, password: str, stream_id: int
+            self, username: str, password: str, stream_id: int
     ) -> Optional[str]:
         """Get actual stream URL for a channel"""
         # Verify authentication
