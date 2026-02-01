@@ -785,7 +785,7 @@ def test_adapter():
     print(f"\nM3U generated: {'YES' if m3u else 'NO'}")
     if m3u:
         lines = m3u.split("\n")
-        print(f"  First 3 lines: {lines[:3]}")
+        print(f"  First 3  lines: {lines[:3]}")
 
     # Get stats
     stats = adapter.get_stats()
