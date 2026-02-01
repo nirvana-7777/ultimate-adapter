@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  ultimate-backend:
+    image: ultimate-backend:latest
+    container_name: ultimate-backend
+    ports:
+      - "7777:7777"
+    environment:
+      - MEDIA_PROXY_URL=http://media-proxy:8080
+      - ULTIMATE_EPG_URL=https://example.com/epg.xml.gz
+    volumes:
+      - ./config:/config
+    restart: unless-stopped
+
+  xtream-adapter:
+    build: ./xtream-adapter
+    container_name: xtream-adapter
+    ports:
+      - "8080:8080"  # API port
+      - "8000:8000"  # Stream port (for compatibility)
+    environment:
+      - ULTIMATE_BACKEND_URL=http://ultimate-backend:7777
+      - SERVER_NAME=Ultimate Xtream Server
+      - SERVER_URL=http://localhost:8080
+      - SERVER_PORT=8080
+      - STREAM_PORT=8000
+      - DEFAULT_USERNAME=user
+      - DEFAULT_PASSWORD=pass
+      - EPG_URL=http://ultimate-backend:7777/api/epg/xmltv  # If Ultimate Backend provides EPG
+      - CACHE_TTL=300
+      - DEBUG=false
+    depends_on:
+      - ultimate-backend
+    restart: unless-stopped
+
+  media-proxy:
+    image: media-proxy:latest
+    container_name: media-proxy
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: xtream-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - xtream-adapter
+      - ultimate-backend
+    restart: unless-stopped
