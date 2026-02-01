@@ -8,8 +8,8 @@ FROM python:3.10-alpine
 WORKDIR /app
 COPY --from=builder /root/.local /root/.local
 COPY . .
-RUN adduser -D -u 1000 xtream && chown -R xtream:xtream /app
-USER xtream
+RUN adduser -D -u 1000 ultimate && chown -R ultimate:ultimate /app
+USER ultimate
 ENV PATH=/root/.local/bin:$PATH
 EXPOSE 8080
 CMD ["gunicorn", "--workers", "4", "--bind", "0.0.0.0:8080", "main:app"]
