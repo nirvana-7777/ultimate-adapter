@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -89,10 +88,10 @@ class UltimateAdapter:
     """
 
     def __init__(
-            self,
-            ultimate_backend_url: str,
-            default_username: str = "user",
-            default_password: str = "pass",
+        self,
+        ultimate_backend_url: str,
+        default_username: str = "user",
+        default_password: str = "pass",
     ):
 
         self.ultimate_backend_url = ultimate_backend_url.rstrip("/")
@@ -120,11 +119,11 @@ class UltimateAdapter:
         logger.info(init_msg)
 
     def _make_request(
-            self,
-            endpoint: str,
-            method: str = "GET",
-            params: Optional[Dict] = None,
-            data: Optional[Dict] = None,
+        self,
+        endpoint: str,
+        method: str = "GET",
+        params: Optional[Dict] = None,
+        data: Optional[Dict] = None,
     ) -> Optional[Dict]:
         """Make HTTP request to Ultimate Backend"""
         url = f"{self.ultimate_backend_url}/{endpoint.lstrip('/')}"
@@ -217,7 +216,7 @@ class UltimateAdapter:
         }
 
     def get_categories(
-            self, stream_type: StreamType = StreamType.LIVE
+        self, stream_type: StreamType = StreamType.LIVE
     ) -> List[Category]:
         """Get categories (providers become categories)"""
         cache_key = "categories"
@@ -271,7 +270,7 @@ class UltimateAdapter:
             if cache_age < 300:  # 5 minutes
                 return self.cache[cache_key]["data"]
 
-        return self._load_all_channels()
+        return self._load_all_channels(category_id)
 
     def _get_channels_for_category(self, category_id: str) -> List[Channel]:
         """Load channels only for specific category (lazy loading)"""
@@ -305,8 +304,10 @@ class UltimateAdapter:
         provider_name = provider.get("name")
         provider_label = provider.get("label", provider_name)
 
-        logger.info(f"Loading channels for category {category_id} "
-                    f"(provider: {provider_name})")
+        logger.info(
+            f"Loading channels for category {category_id} "
+            f"(provider: {provider_name})"
+        )
 
         channels = []
         stream_counter = 1
@@ -316,8 +317,7 @@ class UltimateAdapter:
             response = self._make_request(endpoint)
 
             if not response or "channels" not in response:
-                logger.warning(f"No channels found for provider: "
-                               f"{provider_name}")
+                logger.warning(f"No channels found for provider: " f"{provider_name}")
                 return []
 
             for channel_data in response["channels"]:
@@ -362,15 +362,11 @@ class UltimateAdapter:
         self.cache[cache_key]["data"] = channels
         self.cache[cache_key]["timestamp"] = time.time()
 
-        logger.info(f"Loaded {len(channels)} channels for category "
-                    f"{category_id}")
+        logger.info(f"Loaded {len(channels)} channels for category " f"{category_id}")
 
         return channels
 
-    def _load_all_channels(self) -> List[Channel]:
-        """Load channels from all providers"""
-
-    def _load_all_channels(self) -> List[Channel]:
+    def _load_all_channels(self, category_id: Optional[str] = None) -> List[Channel]:
         """Load channels from all providers"""
         cache_key = "channels"
 
@@ -454,7 +450,7 @@ class UltimateAdapter:
         return self._filter_channels_by_category(all_channels, category_id)
 
     def _filter_channels_by_category(
-            self, channels: List[Channel], category_id: Optional[str]
+        self, channels: List[Channel], category_id: Optional[str]
     ) -> List[Channel]:
         """Filter channels by category ID"""
         if not category_id or category_id == "0":
@@ -483,7 +479,7 @@ class UltimateAdapter:
         return None
 
     def get_epg(
-            self, stream_id: Optional[int] = None, limit: int = 12
+        self, stream_id: Optional[int] = None, limit: int = 12
     ) -> List[EPGProgram]:
         """Get EPG data for a channel or all channels"""
         cache_key = "epg"
@@ -614,7 +610,7 @@ class UltimateAdapter:
         return xmltv
 
     def get_stream_url(
-            self, username: str, password: str, stream_id: int
+        self, username: str, password: str, stream_id: int
     ) -> Optional[str]:
         """Get actual stream URL for a channel"""
         # Verify authentication
@@ -785,7 +781,7 @@ def test_adapter():
     print(f"\nM3U generated: {'YES' if m3u else 'NO'}")
     if m3u:
         lines = m3u.split("\n")
-        print(f"  First 3  lines: {lines[:3]}")
+        print(f"  First 3 lines: {lines[:3]}")
 
     # Get stats
     stats = adapter.get_stats()
