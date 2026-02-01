@@ -8,6 +8,11 @@ on:
     branches: [ master, main ]
   workflow_dispatch:  # Manual trigger
 
+permissions:
+  contents: read
+  security-events: write
+  packages: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -29,7 +34,7 @@ jobs:
       - name: Lint code
         run: |
           pip install flake8 black
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --max-line-length=100
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
           black --check .
 
       - name: Run tests
@@ -111,7 +116,9 @@ jobs:
   security-scan:
     needs: docker
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      security-events: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -124,7 +131,7 @@ jobs:
           output: 'trivy-results.sarif'
 
       - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
