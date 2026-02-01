@@ -285,9 +285,10 @@ class UltimateAdapter:
                 provider_channels = response["channels"]
 
                 for channel_data in provider_channels:
-                    channel_id = channel_data.get("channel_id", "")
-                    channel_name = channel_data.get("name", "Unknown")
-                    channel_logo = channel_data.get("logo_url", "")
+                    # Backend uses capitalized fields: Name, Id, LogoUrl
+                    channel_id = channel_data.get("Id", "")
+                    channel_name = channel_data.get("Name", "Unknown")
+                    channel_logo = channel_data.get("LogoUrl", "")
 
                     # Create stream URL
                     stream_url = (
