@@ -1,19 +1,58 @@
 #!/usr/bin/env python3
 """
-Ultimate Xtream Adapter - Flask wrapper for UltimateAdapter
+Ultimate Adapter - Flask wrapper for UltimateAdapter
 """
 
 import logging
 import os
+import uuid
+from datetime import datetime
 
 from flask import Flask, Response, jsonify, make_response, request
 
 from ultimate_adapter import create_adapter
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+
+# Configure comprehensive logging
+def setup_logging():
+    """Configure comprehensive logging"""
+    # Create logs directory
+    os.makedirs("logs", exist_ok=True)
+
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+
+    # Clear any existing handlers
+    root_logger.handlers.clear()
+
+    # File handler for all logs
+    file_handler = logging.FileHandler(
+        f"logs/ultimate_adapter_{datetime.now().strftime('%Y%m%d')}.log"
+    )
+    file_handler.setLevel(logging.INFO)
+    file_formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    file_handler.setFormatter(file_formatter)
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    console_handler.setFormatter(console_formatter)
+
+    # Add handlers
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+
+    # Reduce verbosity for some libraries
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+
+# Setup logging
+setup_logging()
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -26,9 +65,40 @@ SERVER_PORT = int(os.environ.get("SERVER_PORT", 8080))
 DEBUG_MODE = os.environ.get("DEBUG", "false").lower() == "true"
 
 
+@app.before_request
+def assign_request_id():
+    """Assign a unique ID to each request for tracing"""
+    request.request_id = str(uuid.uuid4())[:8]
+    logger.debug(
+        f"Assigned Request ID: {request.request_id} for {request.method} {request.path}"
+    )
+
+
+@app.before_request
+def log_request_info():
+    """Log information about each request"""
+    if request.path != "/favicon.ico":  # Skip favicon requests
+        request_id = getattr(request, "request_id", "unknown")
+        logger.debug(
+            f"Request {request_id}: {request.method} {request.path} - "
+            f"Content-Type: {request.content_type}, "
+            f"Content-Length: {request.content_length}"
+        )
+
+
+@app.after_request
+def add_request_id_header(response):
+    """Add request ID to response headers"""
+    if hasattr(request, "request_id"):
+        response.headers["X-Request-ID"] = request.request_id
+    return response
+
+
 @app.route("/player_api.php", methods=["GET", "POST"])
 def player_api():
-    """Main Xtream API endpoint"""
+    """Main API endpoint"""
+    request_id = getattr(request, "request_id", "unknown")
+
     # Get parameters
     if request.method == "GET":
         params = request.args.to_dict()
@@ -38,15 +108,41 @@ def player_api():
     username = params.get("username")
     action = params.get("action", "")
 
-    logger.info(f"Xtream API request: action={action}, user={username}")
+    # Log full request details
+    client_ip = request.remote_addr
+    #    user_agent = request.user_agent.string[:100] if request.user_agent else "Unknown"
+
+    logger.info(
+        f"API Request {request_id} - IP: {client_ip}, "
+        f"Action: '{action}', User: {username}, Method: {request.method}"
+    )
+
+    # Log full parameters (excluding sensitive data)
+    safe_params = params.copy()
+    if "password" in safe_params:
+        safe_params["password"] = "***REDACTED***"
+    logger.debug(f"Request {request_id} parameters: {safe_params}")
 
     # Handle request via adapter
-    response_data = adapter.handle_xtream_request(action, params)
+    response_data = adapter.handle_api_request(action, params)
 
-    # Return appropriate response
+    # Log response status
     if isinstance(response_data, dict) and "error" in response_data:
+        logger.warning(
+            f"API Error {request_id} for action '{action}': {response_data['error']}"
+        )
         status_code = 401 if "Invalid credentials" in response_data["error"] else 400
         return jsonify(response_data), status_code
+
+    # Log successful response summary
+    if isinstance(response_data, list):
+        logger.info(
+            f"API Success {request_id} - Action: '{action}', returned {len(response_data)} items"
+        )
+    else:
+        logger.info(
+            f"API Success {request_id} - Action: '{action}', returned dict response"
+        )
 
     return jsonify(response_data)
 
@@ -54,12 +150,18 @@ def player_api():
 @app.route("/live/<username>/<password>/<int:stream_id>")
 def live_stream(username, password, stream_id):
     """Live stream endpoint"""
-    logger.info(f"Live stream request: user={username}, stream={stream_id}")
+    request_id = getattr(request, "request_id", "unknown")
+    logger.info(
+        f"Live stream request {request_id}: user={username}, stream={stream_id}"
+    )
 
     # Get stream URL from adapter
     stream_url = adapter.get_stream_url(username, password, stream_id)
 
     if not stream_url:
+        logger.warning(
+            f"Stream not found {request_id}: user={username}, stream={stream_id}"
+        )
         return "Unauthorized or stream not found", 404
 
     # Redirect to actual stream
@@ -71,27 +173,37 @@ def live_stream(username, password, stream_id):
 @app.route("/movie/<username>/<password>/<int:vod_id>.<ext>")
 def vod_stream(username, password, vod_id, ext):
     """VOD stream endpoint"""
+    request_id = getattr(request, "request_id", "unknown")
+    logger.info(
+        f"VOD stream request {request_id}: user={username}, vod={vod_id}, ext={ext}"
+    )
     return "VOD not supported", 501
 
 
 @app.route("/series/<username>/<password>/<int:series_id>.<ext>")
 def series_stream(username, password, series_id, ext):
     """Series stream endpoint"""
+    request_id = getattr(request, "request_id", "unknown")
+    logger.info(
+        f"Series stream request {request_id}: user={username}, series={series_id}, ext={ext}"
+    )
     return "Series not supported", 501
 
 
 @app.route("/xmltv.php")
 def xmltv_epg():
     """XMLTV EPG endpoint"""
+    request_id = getattr(request, "request_id", "unknown")
     username = request.args.get("username")
     password = request.args.get("password")
 
-    logger.info(f"XMLTV request: user={username}")
+    logger.info(f"XMLTV request {request_id}: user={username}")
 
     # Generate XMLTV via adapter
     xmltv_data = adapter.generate_xmltv_epg(username, password)
 
     if not xmltv_data:
+        logger.warning(f"XMLTV unauthorized {request_id}: user={username}")
         return "Unauthorized", 401
 
     response = make_response(xmltv_data)
@@ -102,12 +214,14 @@ def xmltv_epg():
 @app.route("/m3u/<username>/<password>")
 def m3u_playlist(username, password):
     """M3U playlist endpoint"""
-    logger.info(f"M3U request: user={username}")
+    request_id = getattr(request, "request_id", "unknown")
+    logger.info(f"M3U request {request_id}: user={username}")
 
     # Generate M3U via adapter
     m3u_data = adapter.generate_m3u_playlist(username, password)
 
     if not m3u_data:
+        logger.warning(f"M3U unauthorized {request_id}: user={username}")
         return "Unauthorized", 401
 
     response = make_response(m3u_data)
@@ -120,17 +234,26 @@ def m3u_playlist(username, password):
 @app.route("/get.php")
 def get_stream():
     """Alternative stream endpoint"""
+    request_id = getattr(request, "request_id", "unknown")
     username = request.args.get("username")
     password = request.args.get("password")
     stream_id = request.args.get("stream_id")
 
     if not username or not password or not stream_id:
+        logger.warning(
+            f"Missing parameters {request_id}: username={username}, stream_id={stream_id}"
+        )
         return "Missing parameters", 400
 
     try:
         stream_id_int = int(stream_id)
     except ValueError:
+        logger.warning(f"Invalid stream ID {request_id}: {stream_id}")
         return "Invalid stream ID", 400
+
+    logger.info(
+        f"Get stream request {request_id}: user={username}, stream={stream_id_int}"
+    )
 
     # Redirect to live stream endpoint
     return f"/live/{username}/{password}/{stream_id_int}", 302
@@ -142,7 +265,10 @@ def get_stream():
 @app.route("/admin/flush_cache")
 def flush_cache():
     """Flush adapter cache (admin only)"""
+    request_id = getattr(request, "request_id", "unknown")
     cache_type = request.args.get("type")
+    logger.info(f"Flush cache request {request_id}: type={cache_type}")
+
     result = adapter.flush_cache(cache_type)
     return jsonify(result)
 
@@ -150,6 +276,9 @@ def flush_cache():
 @app.route("/admin/stats")
 def get_stats():
     """Get adapter statistics"""
+    request_id = getattr(request, "request_id", "unknown")
+    logger.info(f"Stats request {request_id}")
+
     stats = adapter.get_stats()
     return jsonify(stats)
 
@@ -157,11 +286,17 @@ def get_stats():
 @app.route("/admin/test_backend")
 def test_backend():
     """Test connection to Ultimate Backend"""
+    request_id = getattr(request, "request_id", "unknown")
+    logger.info(f"Test backend request {request_id}")
+
     # Try to fetch providers
     providers = adapter._make_request("/api/providers")
 
     if providers:
         providers_list = providers.get("providers", [])
+        logger.info(
+            f"Backend test successful {request_id}: {len(providers_list)} providers found"
+        )
         return jsonify(
             {
                 "status": "connected",
@@ -170,6 +305,9 @@ def test_backend():
             }
         )
     else:
+        logger.error(
+            f"Backend test failed {request_id}: Cannot connect to Ultimate Backend"
+        )
         return (
             jsonify(
                 {
@@ -185,6 +323,9 @@ def test_backend():
 @app.route("/health")
 def health():
     """Health check endpoint"""
+    request_id = getattr(request, "request_id", "unknown")
+    logger.debug(f"Health check request {request_id}")
+
     # Test backend connection
     providers = adapter._make_request("/api/providers")
     backend_ok = bool(providers)
@@ -207,13 +348,16 @@ def health():
 @app.route("/")
 def index():
     """Welcome page"""
+    request_id = getattr(request, "request_id", "unknown")
+    logger.info(f"Index page request {request_id}")
+
     stats = adapter.get_stats()
 
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Ultimate Xtream Adapter</title>
+        <title>Ultimate Adapter</title>
         <style>
             body {{ font-family: Arial, sans-serif; margin: 40px; }}
             .info {{
@@ -228,10 +372,12 @@ def index():
                 border-left: 4px solid #2196F3;
             }}
             code {{ background: #eee; padding: 2px 5px; }}
+            .request-id {{ color: #666; font-size: 0.9em; }}
         </style>
     </head>
     <body>
-        <h1>Ultimate Xtream Adapter</h1>
+        <h1>Ultimate Adapter</h1>
+        <div class="request-id">Request ID: {request_id}</div>
 
         <div class="info">
             <h3>Backend: {adapter.ultimate_backend_url}</h3>
@@ -239,14 +385,17 @@ def index():
             <p><strong>Providers:</strong> {stats['providers_count']}</p>
         </div>
 
-        <h2>Xtream API Endpoints</h2>
+        <h2>API Endpoints</h2>
 
         <div class="endpoint">
             <h3>Main API</h3>
-            <p><code>GET /player_api.php?username=user&password=pass&
-action=get_live_categories</code></p>
-            <p>Actions: get_live_categories, get_live_streams,
-get_short_epg</p>
+            <p>
+                <code>
+                    GET /player_api.php?username=user&password=pass&
+                    action=get_live_categories
+                </code>
+            </p>
+            <p>Actions: get_live_categories, get_live_streams, get_short_epg</p>
         </div>
 
         <div class="endpoint">
@@ -256,22 +405,18 @@ get_short_epg</p>
 
         <div class="endpoint">
             <h3>Playlists</h3>
-            <p><code>GET /m3u/username/password</code>
-(M3U Playlist)</p>
-            <p><code>GET /xmltv.php?username=user&password=pass</code>
-(XMLTV EPG)</p>
+            <p><code>GET /m3u/username/password</code> (M3U Playlist)</p>
+            <p><code>GET /xmltv.php?username=user&password=pass</code> (XMLTV EPG)</p>
         </div>
 
         <div class="endpoint">
             <h3>Admin</h3>
             <p><code>GET /health</code> (Health check)</p>
             <p><code>GET /admin/stats</code> (Statistics)</p>
-            <p><code>GET /admin/flush_cache?type=channels</code>
-(Clear cache)</p>
+            <p><code>GET /admin/flush_cache?type=channels</code> (Clear cache)</p>
         </div>
 
-        <p><a href="/health">Check Health</a> |
-<a href="/admin/stats">View Stats</a></p>
+        <p><a href="/health">Check Health</a> | <a href="/admin/stats">View Stats</a></p>
     </body>
     </html>
     """
@@ -284,17 +429,41 @@ get_short_epg</p>
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({"error": "Not found", "endpoint": request.path}), 404
+    """Log and handle 404 errors"""
+    request_id = getattr(request, "request_id", "unknown")
+    logger.warning(
+        f"404 Not Found {request_id} - Path: {request.path}, "
+        f"Method: {request.method}, IP: {request.remote_addr}"
+    )
+    return (
+        jsonify(
+            {"error": "Not found", "endpoint": request.path, "request_id": request_id}
+        ),
+        404,
+    )
+
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+    """Log and handle 405 errors"""
+    request_id = getattr(request, "request_id", "unknown")
+    logger.warning(
+        f"405 Method Not Allowed {request_id} - Path: {request.path}, "
+        f"Method: {request.method}, IP: {request.remote_addr}"
+    )
+    return jsonify({"error": "Method not allowed", "request_id": request_id}), 405
 
 
 @app.errorhandler(500)
 def internal_error(error):
-    logger.error(f"Internal server error: {error}")
-    return jsonify({"error": "Internal server error"}), 500
+    """Log and handle 500 errors"""
+    request_id = getattr(request, "request_id", "unknown")
+    logger.error(f"Internal server error {request_id}: {error}", exc_info=True)
+    return jsonify({"error": "Internal server error", "request_id": request_id}), 500
 
 
 if __name__ == "__main__":
-    logger.info(f"Starting Ultimate Xtream Adapter on port {SERVER_PORT}")
+    logger.info(f"Starting Ultimate Adapter on port {SERVER_PORT}")
     logger.info(f"Backend URL: {adapter.ultimate_backend_url}")
     default_creds = f"{adapter.default_username}/{adapter.default_password}"
     logger.info(f"Default credentials: {default_creds}")

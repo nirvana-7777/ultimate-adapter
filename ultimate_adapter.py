@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Ultimate Adapter - Xtream API adapter for Ultimate Backend
-Maps Xtream API calls to Ultimate Backend endpoints
+Ultimate Adapter - API adapter for Ultimate Backend
+Maps API calls to Ultimate Backend endpoints
 """
 
 import json
@@ -83,7 +83,7 @@ class EPGProgram:
 
 class UltimateAdapter:
     """
-    Adapter that translates Xtream API calls to Ultimate Backend API
+    Adapter that translates API calls to Ultimate Backend API
     calls
     """
 
@@ -131,6 +131,8 @@ class UltimateAdapter:
         headers = {"User-Agent": "UltimateAdapter/1.0", "Accept": "application/json"}
 
         try:
+            logger.debug(f"Making request to backend: {method} {url}")
+
             if method == "GET":
                 response = requests.get(
                     url, params=params, headers=headers, timeout=(10, 60)
@@ -150,16 +152,19 @@ class UltimateAdapter:
                     return response.json()
                 except json.JSONDecodeError:
                     # Some endpoints return plain text (M3U)
+                    logger.debug(f"Backend returned non-JSON response for {url}")
                     return {"_raw": response.text}
             else:
-                logger.error(f"Request failed: {response.status_code}")
+                logger.error(
+                    f"Backend request failed: {response.status_code} for {url}"
+                )
                 return None
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Request to {url} failed: {e}")
             return None
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"Unexpected error making request: {e}")
             return None
 
     def _load_providers(self, force_refresh: bool = False) -> bool:
@@ -170,19 +175,21 @@ class UltimateAdapter:
         if not force_refresh and self.cache[cache_key]["data"]:
             cache_age = time.time() - self.cache[cache_key]["timestamp"]
             if cache_age < 300:  # 5 minutes
+                logger.debug(f"Using cached providers (age: {cache_age:.1f}s)")
                 return True
 
         try:
+            logger.info("Loading providers from backend...")
             response = self._make_request("/api/providers")
             if not response:
-                logger.error("Failed to fetch providers")
+                logger.error("Failed to fetch providers from backend")
                 return False
 
             self.cache[cache_key]["data"] = response.get("providers", [])
             self.cache[cache_key]["timestamp"] = time.time()
 
             providers_count = len(self.cache[cache_key]["data"])
-            logger.info(f"Loaded {providers_count} providers")
+            logger.info(f"Loaded {providers_count} providers from backend")
             return True
 
         except Exception as e:
@@ -193,6 +200,7 @@ class UltimateAdapter:
         """Authenticate user (simplified - in production use database)"""
         # For demo purposes, accept default credentials
         if username == self.default_username and password == self.default_password:
+            logger.debug(f"Authentication successful for user: {username}")
             return User(
                 username=username,
                 password=password,
@@ -202,10 +210,12 @@ class UltimateAdapter:
                 active_cons=0,
                 status="Active",
             )
+        logger.warning(f"Authentication failed for user: {username}")
         return None
 
     def get_server_info(self) -> Dict:
-        """Get server information for Xtream API"""
+        """Get server information for API"""
+        logger.debug("Returning server info")
         return {
             "url": self.ultimate_backend_url,
             "port": "7777",
@@ -225,9 +235,11 @@ class UltimateAdapter:
         if self.cache[cache_key]["data"]:
             cache_age = time.time() - self.cache[cache_key]["timestamp"]
             if cache_age < 300:  # 5 minutes
+                logger.debug(f"Using cached categories (age: {cache_age:.1f}s)")
                 return self.cache[cache_key]["data"]
 
         if not self._load_providers():
+            logger.warning("Cannot load categories: providers not loaded")
             return []
 
         categories = []
@@ -252,6 +264,7 @@ class UltimateAdapter:
         self.cache[cache_key]["data"] = categories
         self.cache[cache_key]["timestamp"] = time.time()
 
+        logger.info(f"Generated {len(categories)} categories")
         return categories
 
     def get_channels(self, category_id: Optional[str] = None) -> List[Channel]:
@@ -268,6 +281,7 @@ class UltimateAdapter:
         if self.cache[cache_key]["data"]:
             cache_age = time.time() - self.cache[cache_key]["timestamp"]
             if cache_age < 300:  # 5 minutes
+                logger.debug(f"Using cached channels (age: {cache_age:.1f}s)")
                 return self.cache[cache_key]["data"]
 
         return self._load_all_channels(category_id)
@@ -283,9 +297,15 @@ class UltimateAdapter:
         if self.cache[cache_key]["data"]:
             cache_age = time.time() - self.cache[cache_key]["timestamp"]
             if cache_age < 300:  # 5 minutes
+                logger.debug(
+                    f"Using cached channels for category {category_id} (age: {cache_age:.1f}s)"
+                )
                 return self.cache[cache_key]["data"]
 
         if not self._load_providers():
+            logger.warning(
+                f"Cannot load channels: providers not loaded for category {category_id}"
+            )
             return []
 
         providers = self.cache["providers"]["data"]
@@ -371,6 +391,7 @@ class UltimateAdapter:
         cache_key = "channels"
 
         if not self._load_providers():
+            logger.warning("Cannot load all channels: providers not loaded")
             return []
 
         all_channels = []
@@ -444,7 +465,7 @@ class UltimateAdapter:
         self.cache[cache_key]["data"] = all_channels
         self.cache[cache_key]["timestamp"] = time.time()
 
-        logger.info(f"Loaded {len(all_channels)} channels")
+        logger.info(f"Loaded {len(all_channels)} channels from all providers")
 
         # Filter if category specified
         return self._filter_channels_by_category(all_channels, category_id)
@@ -465,17 +486,22 @@ class UltimateAdapter:
                 break
 
         if not category_name:
+            logger.warning(f"Category name not found for ID: {category_id}")
             return channels
 
         # Filter channels by category name
-        return [c for c in channels if c.category_name == category_name]
+        filtered = [c for c in channels if c.category_name == category_name]
+        logger.debug(f"Filtered channels: {len(filtered)} for category {category_name}")
+        return filtered
 
     def get_channel_by_id(self, stream_id: int) -> Optional[Channel]:
         """Get a specific channel by stream ID"""
         channels = self.get_channels()
         for channel in channels:
             if channel.stream_id == stream_id:
+                logger.debug(f"Found channel {stream_id}: {channel.name}")
                 return channel
+        logger.warning(f"Channel not found for stream_id: {stream_id}")
         return None
 
     def get_epg(
@@ -488,10 +514,15 @@ class UltimateAdapter:
         if self.cache[cache_key]["data"]:
             cache_age = time.time() - self.cache[cache_key]["timestamp"]
             if cache_age < 3600:  # 1 hour
+                logger.debug(f"Using cached EPG (age: {cache_age:.1f}s)")
                 epg_data = self.cache[cache_key]["data"]
                 if stream_id:
                     filtered = [p for p in epg_data if p.channel_id == str(stream_id)]
+                    logger.debug(
+                        f"Returning {len(filtered[:limit])} EPG entries for stream {stream_id}"
+                    )
                     return filtered[:limit]
+                logger.debug(f"Returning {len(epg_data[:limit])} EPG entries")
                 return epg_data[:limit]
 
         # Try to get EPG from Ultimate Backend
@@ -500,6 +531,7 @@ class UltimateAdapter:
             response = self._make_request("/api/epg/xmltv-channels")
             if not response:
                 # Return empty EPG
+                logger.info("No EPG data available from backend")
                 self.cache[cache_key]["data"] = []
                 self.cache[cache_key]["timestamp"] = time.time()
                 return []
@@ -534,7 +566,12 @@ class UltimateAdapter:
 
             if stream_id:
                 filtered = [p for p in epg_programs if p.channel_id == str(stream_id)]
+                logger.info(
+                    f"Generated {len(filtered[:limit])} dummy EPG entries for stream {stream_id}"
+                )
                 return filtered[:limit]
+
+            logger.info(f"Generated {len(epg_programs[:limit])} dummy EPG entries")
             return epg_programs[:limit]
 
         except Exception as e:
@@ -546,6 +583,9 @@ class UltimateAdapter:
         # Verify authentication
         user = self.authenticate(username, password)
         if not user:
+            logger.warning(
+                f"M3U generation failed: authentication failed for {username}"
+            )
             return ""
 
         channels = self.get_channels()
@@ -564,6 +604,9 @@ class UltimateAdapter:
             # Add stream URL
             m3u_content += f"{channel.direct_source}\n"
 
+        logger.info(
+            f"Generated M3U playlist with {len(channels)} channels for {username}"
+        )
         return m3u_content
 
     def generate_xmltv_epg(self, username: str, password: str) -> str:
@@ -571,6 +614,9 @@ class UltimateAdapter:
         # Verify authentication
         user = self.authenticate(username, password)
         if not user:
+            logger.warning(
+                f"XMLTV generation failed: authentication failed for {username}"
+            )
             return ""
 
         channels = self.get_channels()
@@ -607,6 +653,10 @@ class UltimateAdapter:
 
         xmltv += "</tv>"
 
+        logger.info(
+            f"Generated XMLTV EPG with {len(channels)} channels and"
+            f" {len(epg_data)} programs for {username}"
+        )
         return xmltv
 
     def get_stream_url(
@@ -616,17 +666,30 @@ class UltimateAdapter:
         # Verify authentication
         user = self.authenticate(username, password)
         if not user:
+            logger.warning(
+                f"Stream URL request failed: authentication failed for {username}"
+            )
             return None
 
         # Get channel info
         channel = self.get_channel_by_id(stream_id)
         if not channel:
+            logger.warning(
+                f"Stream URL request failed: channel {stream_id} not found for {username}"
+            )
             return None
 
+        logger.info(f"Returning stream URL for channel {stream_id} to user {username}")
         return channel.direct_source
 
-    def handle_xtream_request(self, action: str, params: Dict) -> Dict:
-        """Handle Xtream API request and return appropriate response"""
+    def handle_api_request(self, action: str, params: Dict) -> Dict:
+        """Handle API request and return appropriate response"""
+
+        # Log all incoming requests
+        username = params.get("username", "unknown")
+        logger.info(
+            f"Adapter handling API request - Action: '{action}', User: {username}"
+        )
 
         # Extract common parameters
         username = params.get("username")
@@ -636,67 +699,150 @@ class UltimateAdapter:
         if action not in ["", "test"]:
             user = self.authenticate(username, password)
             if not user:
+                logger.warning(f"API authentication failed for user: {username}")
                 return {"error": "Invalid credentials"}
 
         # Handle different actions
-        if action == "" or action == "test":
-            # Return user info
-            user = self.authenticate(username, password)
-            if not user:
-                return {"error": "Invalid credentials"}
+        try:
+            if action == "" or action == "test":
+                # Return user info
+                user = self.authenticate(username, password)
+                if not user:
+                    return {"error": "Invalid credentials"}
 
-            return {"user_info": asdict(user), "server_info": self.get_server_info()}
+                logger.info(f"Test action completed for user: {username}")
+                return {
+                    "user_info": asdict(user),
+                    "server_info": self.get_server_info(),
+                }
 
-        elif action == "get_live_categories":
-            categories = self.get_categories(StreamType.LIVE)
-            return [asdict(cat) for cat in categories]
+            elif action == "get_live_categories":
+                categories = self.get_categories(StreamType.LIVE)
+                logger.info(
+                    f"Returning {len(categories)} live categories for user: {username}"
+                )
+                return [asdict(cat) for cat in categories]
 
-        elif action == "get_live_streams":
-            category_id = params.get("category_id")
-            channels = self.get_channels(category_id)
-            return [asdict(channel) for channel in channels]
+            elif action == "get_live_streams":
+                category_id = params.get("category_id")
+                channels = self.get_channels(category_id)
+                logger.info(
+                    f"Returning {len(channels)} live streams "
+                    f"(category_id: {category_id}) for user: {username}"
+                )
+                return [asdict(channel) for channel in channels]
 
-        elif action == "get_vod_categories":
-            # VOD not currently supported
-            return []
+            elif action == "get_vod_categories":
+                # VOD not currently supported
+                logger.info(
+                    f"VOD categories requested (not supported) by user: {username}"
+                )
+                return []
 
-        elif action == "get_vod_streams":
-            # VOD not currently supported
-            return []
+            elif action == "get_vod_streams":
+                # VOD not currently supported
+                logger.info(
+                    f"VOD streams requested (not supported) by user: {username}"
+                )
+                return []
 
-        elif action == "get_series_categories":
-            # Series not currently supported
-            return []
+            elif action == "get_series_categories":
+                # Series not currently supported
+                logger.info(
+                    f"Series categories requested (not supported) by user: {username}"
+                )
+                return []
 
-        elif action == "get_series":
-            # Series not currently supported
-            return []
+            elif action == "get_series":
+                # Series not currently supported
+                logger.info(f"Series requested (not supported) by user: {username}")
+                return []
 
-        elif action == "get_short_epg":
-            stream_id = params.get("stream_id")
-            limit = int(params.get("limit", 12))
+            elif action == "get_short_epg":
+                stream_id = params.get("stream_id")
+                limit = int(params.get("limit", 12))
 
-            if stream_id:
-                try:
-                    stream_id_int = int(stream_id)
-                    epg = self.get_epg(stream_id_int, limit)
-                except ValueError:
-                    epg = []
+                if stream_id:
+                    try:
+                        stream_id_int = int(stream_id)
+                        epg = self.get_epg(stream_id_int, limit)
+                        logger.info(
+                            f"Returning EPG for stream_id: {stream_id_int}, "
+                            f"limit: {limit} for user: {username}"
+                        )
+                    except ValueError:
+                        logger.warning(
+                            f"Invalid stream_id format: {stream_id} from user: {username}"
+                        )
+                        epg = []
+                else:
+                    epg = self.get_epg(limit=limit)
+                    logger.info(
+                        f"Returning EPG for all streams, limit: {limit} for user: {username}"
+                    )
+
+                return [asdict(program) for program in epg]
+
+            elif action == "get_simple_data_table":
+                # Common but unsupported action
+                logger.info(
+                    f"get_simple_data_table requested (not implemented) by user: {username}"
+                )
+                return []
+
+            elif action == "get_vod_info":
+                logger.info(
+                    f"get_vod_info requested (not supported) by user: {username}"
+                )
+                return {}
+
+            elif action == "get_series_info":
+                logger.info(
+                    f"get_series_info requested (not supported) by user: {username}"
+                )
+                return {}
+
+            elif action in ["get_languages", "get_countries"]:
+                # Common actions that return empty for now
+                logger.info(
+                    f"Action '{action}' requested (returning empty) by user: {username}"
+                )
+                return []
+
             else:
-                epg = self.get_epg(limit=limit)
+                # Log unknown/unhandled action with full details
+                logger.warning(f"UNHANDLED ACTION: '{action}' with params: {params}")
 
-            return [asdict(program) for program in epg]
+                # Log to a separate file for analysis
+                try:
+                    with open("logs/unhandled_requests.log", "a") as log_file:
+                        log_file.write(
+                            f"{datetime.now().isoformat()} - Action: {action}, Params: {params}\n"
+                        )
+                except Exception as e:
+                    logger.error(f"Could not write to unhandled requests log: {e}")
 
-        else:
-            return {"error": f"Unknown action: {action}"}
+                return {"error": f"Unknown action: {action}"}
+
+        except Exception as e:
+            # Log any unexpected errors
+            logger.error(
+                f"Error handling action '{action}' for user {username}: {str(e)}",
+                exc_info=True,
+            )
+            return {"error": f"Internal server error: {str(e)}"}
 
     def flush_cache(self, cache_type: Optional[str] = None) -> Dict:
         """Flush cache"""
+        logger.info(f"Flushing cache - type: {cache_type}")
+
         if cache_type:
             if cache_type in self.cache:
                 self.cache[cache_type] = {"data": None, "timestamp": 0}
+                logger.info(f"Cache {cache_type} cleared")
                 return {"message": f"Cache {cache_type} cleared"}
             else:
+                logger.warning(f"Unknown cache type: {cache_type}")
                 return {"error": f"Unknown cache type: {cache_type}"}
         else:
             # Clear all caches
@@ -704,10 +850,12 @@ class UltimateAdapter:
                 self.cache[key] = {"data": None, "timestamp": 0}
             self.channel_map.clear()
             self.reverse_channel_map.clear()
+            logger.info("All caches cleared")
             return {"message": "All caches cleared"}
 
     def get_stats(self) -> Dict:
         """Get adapter statistics"""
+        logger.debug("Generating adapter statistics")
         channels = self.get_channels()
 
         providers_data = self.cache["providers"]["data"]
@@ -768,9 +916,9 @@ def test_adapter():
     for ch in channels[:3]:  # Show first 3
         print(f"  - {ch.name} (ID: {ch.stream_id})")
 
-    # Test Xtream request
-    print("\nTesting Xtream API simulation...")
-    response = adapter.handle_xtream_request(
+    # Test API request
+    print("\nTesting API simulation...")
+    response = adapter.handle_api_request(
         "get_live_categories", {"username": "user", "password": "pass"}
     )
     result = len(response) if isinstance(response, list) else "error"
