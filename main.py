@@ -8,6 +8,7 @@ import os
 import uuid
 from datetime import datetime
 
+import requests
 from flask import Flask, Response, jsonify, make_response, request
 
 from ultimate_adapter import create_adapter
@@ -63,6 +64,7 @@ adapter = create_adapter()
 # Configuration
 SERVER_PORT = int(os.environ.get("SERVER_PORT", 8080))
 DEBUG_MODE = os.environ.get("DEBUG", "false").lower() == "true"
+HLS_CONVERTER_URL = os.environ.get("HLS_CONVERTER_URL", "http://hls-converter:8000")
 
 
 @app.before_request
@@ -148,38 +150,80 @@ def player_api():
 
 
 @app.route("/live/<username>/<password>/<int:stream_id>")
-@app.route(
-    "/live/<username>/<password>/<int:stream_id>.<ext>"
-)  # Add this for .ts/.m3u8 requests
+@app.route("/live/<username>/<password>/<int:stream_id>.<ext>")
 def live_stream(username, password, stream_id, ext=None):
-    """Live stream endpoint"""
+    """Live stream endpoint with HLS conversion"""
     request_id = getattr(request, "request_id", "unknown")
+
+    # Log the request
     logger.info(
-        f"Live stream request {request_id}: user={username}, stream={stream_id}, ext={ext}"
+        f"Live stream request {request_id}: user={username}, "
+        f"stream={stream_id}, ext={ext}"
     )
 
     # Get stream URL from adapter
-    stream_url = adapter.get_stream_url(username, password, stream_id)
+    dash_url = adapter.get_stream_url(username, password, stream_id)
 
-    if not stream_url:
+    if not dash_url:
         logger.warning(
             f"Stream not found {request_id}: user={username}, stream={stream_id}"
         )
         return "Unauthorized or stream not found", 404
 
-    # If extension is provided (like .ts), append it to the stream URL
-    # Some players expect the redirect to have the same extension
-    if ext:
-        # Check if the stream_url already has an extension
-        # If not, append the requested extension
-        if not any(stream_url.endswith(f".{e}") for e in ["ts", "m3u8", "mpd", "m4s"]):
-            # For demonstration - adapt based on your actual stream URLs
-            # You might need to modify the stream_url differently based on your backend
-            logger.debug(f"Appending extension .{ext} to stream URL")
+    # If client expects TS/HLS, use converter
+    if ext and ext in ["ts", "m3u8"]:
+        # Check if HLS converter is configured
+        hls_converter_url = os.environ.get("HLS_CONVERTER_URL")
 
-    # Redirect to actual stream
+        if hls_converter_url:
+            try:
+                # Request HLS conversion
+                logger.info(
+                    f"Converting DASH to HLS for {request_id}: " f"stream={stream_id}"
+                )
+
+                response = requests.post(
+                    f"{hls_converter_url}/convert",
+                    json={"dash_url": dash_url},
+                    timeout=5,
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    hls_url = f"{hls_converter_url}{data['hls_url']}"
+
+                    logger.info(
+                        f"HLS conversion successful {request_id}: " f"hls_url={hls_url}"
+                    )
+
+                    return Response(
+                        "Redirecting to HLS stream...",
+                        status=302,
+                        headers={"Location": hls_url},
+                    )
+                else:
+                    logger.warning(
+                        f"HLS converter returned {response.status_code} "
+                        f"for {request_id}"
+                    )
+
+            except requests.exceptions.Timeout:
+                logger.error(f"HLS converter timeout for {request_id}")
+            except requests.exceptions.ConnectionError:
+                logger.error(f"Cannot connect to HLS converter for {request_id}")
+            except Exception as e:
+                logger.error(f"HLS converter error for {request_id}: {e}")
+        else:
+            logger.warning(
+                f"No HLS converter configured for {request_id}, "
+                f"falling back to DASH"
+            )
+
+    # Redirect to original DASH stream
+    logger.info(f"Redirecting to DASH stream {request_id}: " f"url={dash_url}")
+
     return Response(
-        "Redirecting to stream...", status=302, headers={"Location": stream_url}
+        "Redirecting to stream...", status=302, headers={"Location": dash_url}
     )
 
 
