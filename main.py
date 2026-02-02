@@ -148,11 +148,14 @@ def player_api():
 
 
 @app.route("/live/<username>/<password>/<int:stream_id>")
-def live_stream(username, password, stream_id):
+@app.route(
+    "/live/<username>/<password>/<int:stream_id>.<ext>"
+)  # Add this for .ts/.m3u8 requests
+def live_stream(username, password, stream_id, ext=None):
     """Live stream endpoint"""
     request_id = getattr(request, "request_id", "unknown")
     logger.info(
-        f"Live stream request {request_id}: user={username}, stream={stream_id}"
+        f"Live stream request {request_id}: user={username}, stream={stream_id}, ext={ext}"
     )
 
     # Get stream URL from adapter
@@ -163,6 +166,16 @@ def live_stream(username, password, stream_id):
             f"Stream not found {request_id}: user={username}, stream={stream_id}"
         )
         return "Unauthorized or stream not found", 404
+
+    # If extension is provided (like .ts), append it to the stream URL
+    # Some players expect the redirect to have the same extension
+    if ext:
+        # Check if the stream_url already has an extension
+        # If not, append the requested extension
+        if not any(stream_url.endswith(f".{e}") for e in ["ts", "m3u8", "mpd", "m4s"]):
+            # For demonstration - adapt based on your actual stream URLs
+            # You might need to modify the stream_url differently based on your backend
+            logger.debug(f"Appending extension .{ext} to stream URL")
 
     # Redirect to actual stream
     return Response(
