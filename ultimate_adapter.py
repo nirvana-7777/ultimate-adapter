@@ -354,7 +354,7 @@ class UltimateAdapter:
                 stream_url = (
                     f"{self.ultimate_backend_url}/api/providers/"
                     f"{provider_name}/channels/{channel_id}/"
-                    f"stream/decrypted/index.mpd"
+                    f"stream/decrypted/ffmpeg/index.mpd"
                 )
 
                 # Create channel object
@@ -430,7 +430,7 @@ class UltimateAdapter:
                     stream_url = (
                         f"{self.ultimate_backend_url}/api/providers/"
                         f"{provider_name}/channels/{channel_id}/"
-                        f"stream/decrypted/index.mpd"
+                        f"stream/decrypted/ffmpeg/index.mpd"
                     )
 
                     # Create channel object
