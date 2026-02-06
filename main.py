@@ -8,7 +8,6 @@ import os
 import uuid
 from datetime import datetime
 
-import requests
 from flask import Flask, Response, jsonify, make_response, request
 
 from ultimate_adapter import create_adapter
@@ -64,7 +63,10 @@ adapter = create_adapter()
 # Configuration
 SERVER_PORT = int(os.environ.get("SERVER_PORT", 8080))
 DEBUG_MODE = os.environ.get("DEBUG", "false").lower() == "true"
-HLS_CONVERTER_URL = os.environ.get("HLS_CONVERTER_URL", "http://hls-converter:8000")
+# Support both env var names for backward compatibility
+MPEGTS_PROXY_URL = os.environ.get(
+    "MPEGTS_PROXY_URL", os.environ.get("HLS_CONVERTER_URL", "http://mpegts-proxy:8000")
+)
 
 
 @app.before_request
@@ -152,7 +154,7 @@ def player_api():
 @app.route("/live/<username>/<password>/<int:stream_id>")
 @app.route("/live/<username>/<password>/<int:stream_id>.<ext>")
 def live_stream(username, password, stream_id, ext=None):
-    """Live stream endpoint with HLS conversion"""
+    """Live stream endpoint with MPEG-TS proxy conversion"""
     request_id = getattr(request, "request_id", "unknown")
 
     # Log the request
@@ -170,57 +172,47 @@ def live_stream(username, password, stream_id, ext=None):
         )
         return "Unauthorized or stream not found", 404
 
-    # If client expects TS/HLS, use converter
+    # If client expects TS/M3U8, use MPEG-TS proxy
     if ext and ext in ["ts", "m3u8"]:
-        # Check if HLS converter is configured
-        hls_converter_url = os.environ.get("HLS_CONVERTER_URL")
+        # Check if MPEGTS proxy is configured (supports both env var names)
+        mpegts_proxy_url = os.environ.get(
+            "MPEGTS_PROXY_URL", os.environ.get("HLS_CONVERTER_URL")
+        )
 
-        if hls_converter_url:
+        if mpegts_proxy_url:
             try:
-                # Request HLS conversion
+                # Get channel name for metadata
+                channel = adapter.get_channel_by_id(stream_id)
+                stream_name = channel.name if channel else f"Stream {stream_id}"
+
+                # Build MPEG-TS proxy URL with stream parameter
+                from urllib.parse import urlencode
+
+                params = {"url": dash_url, "name": stream_name}
+                mpegts_url = f"{mpegts_proxy_url}/stream?{urlencode(params)}"
+
                 logger.info(
-                    f"Converting DASH to HLS for {request_id}: " f"stream={stream_id}"
+                    f"Proxying DASH to MPEG-TS for {request_id}: stream={stream_id}"
                 )
 
-                response = requests.post(
-                    f"{hls_converter_url}/convert",
-                    json={"dash_url": dash_url},
-                    timeout=5,
+                # Redirect to MPEG-TS proxy
+                return Response(
+                    "Redirecting to MPEG-TS stream...",
+                    status=302,
+                    headers={"Location": mpegts_url},
                 )
 
-                if response.status_code == 200:
-                    data = response.json()
-                    hls_url = f"{hls_converter_url}{data['hls_url']}"
-
-                    logger.info(
-                        f"HLS conversion successful {request_id}: " f"hls_url={hls_url}"
-                    )
-
-                    return Response(
-                        "Redirecting to HLS stream...",
-                        status=302,
-                        headers={"Location": hls_url},
-                    )
-                else:
-                    logger.warning(
-                        f"HLS converter returned {response.status_code} "
-                        f"for {request_id}"
-                    )
-
-            except requests.exceptions.Timeout:
-                logger.error(f"HLS converter timeout for {request_id}")
-            except requests.exceptions.ConnectionError:
-                logger.error(f"Cannot connect to HLS converter for {request_id}")
             except Exception as e:
-                logger.error(f"HLS converter error for {request_id}: {e}")
+                logger.error(f"MPEG-TS proxy error for {request_id}: {e}")
+                # Fall through to DASH redirect
         else:
             logger.warning(
-                f"No HLS converter configured for {request_id}, "
+                f"No MPEG-TS proxy configured for {request_id}, "
                 f"falling back to DASH"
             )
 
     # Redirect to original DASH stream
-    logger.info(f"Redirecting to DASH stream {request_id}: " f"url={dash_url}")
+    logger.info(f"Redirecting to DASH stream {request_id}: url={dash_url}")
 
     return Response(
         "Redirecting to stream...", status=302, headers={"Location": dash_url}
