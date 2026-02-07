@@ -181,38 +181,21 @@ def live_stream(username, password, stream_id, ext=None):
 
         if mpegts_proxy_url:
             try:
-                # Check if dash_url is a pipe:// FFmpeg command
-                if dash_url.startswith("pipe://"):
-                    # Extract the actual URL from the FFmpeg command
-                    import re
-
-                    # Look for -i "URL" or -i URL pattern
-                    match = re.search(r'-i\s+"([^"]+)"', dash_url) or re.search(
-                        r"-i\s+(\S+)", dash_url
-                    )
-                    if match:
-                        actual_url = match.group(1)
-                        logger.info(f"Extracted URL from pipe command: {actual_url}")
-                        dash_url = actual_url
-                    else:
-                        logger.error(
-                            f"Could not extract URL from pipe command: {dash_url[:100]}"
-                        )
-                        return "Invalid stream URL format", 500
-
                 # Get channel name for metadata
                 channel = adapter.get_channel_by_id(stream_id)
                 stream_name = channel.name if channel else f"Stream {stream_id}"
 
-                # Build MPEG-TS proxy URL with stream parameter
+                # Pass the URL or pipe command directly to proxy
+                # Proxy will handle both formats
                 from urllib.parse import urlencode
 
-                params = {"url": dash_url, "name": stream_name}
+                params = {
+                    "url": dash_url,  # Can be pipe://... or http://...
+                    "name": stream_name,
+                }
                 mpegts_url = f"{mpegts_proxy_url}/stream?{urlencode(params)}"
 
-                logger.info(
-                    f"Proxying DASH to MPEG-TS for {request_id}: stream={stream_id}"
-                )
+                logger.info(f"Proxying to MPEG-TS for {request_id}: stream={stream_id}")
 
                 # Redirect to MPEG-TS proxy
                 return Response(
