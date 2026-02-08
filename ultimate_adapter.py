@@ -49,8 +49,8 @@ class User:
 
 @dataclass
 class Channel:
-    stream_id: int
-    num: int
+    stream_id: int  # Hash-based ID for internal lookups (deterministic)
+    num: int  # Simple counter for display (1, 2, 3...)
     name: str
     stream_type: str = "live"
     stream_icon: str = ""
@@ -125,8 +125,7 @@ class UltimateAdapter:
 
         logger.info(f"Ultimate Adapter initialized for backend: {ultimate_backend_url}")
 
-    @staticmethod
-    def _generate_stream_id(provider_name: str, channel_id: str) -> int:
+    def _generate_stream_id(self, provider_name: str, channel_id: str) -> int:
         """
         Generate a deterministic stream_id from provider name and channel ID.
 
@@ -407,6 +406,7 @@ class UltimateAdapter:
         )
 
         channels = []
+        num_counter = 1  # Simple counter for channel numbers (1, 2, 3...)
 
         try:
             endpoint = f"/api/providers/{provider_name}/channels"
@@ -426,7 +426,7 @@ class UltimateAdapter:
                 if channel_data.get("IsRadio", False):
                     continue
 
-                # Generate deterministic stream_id from provider and channel
+                # Generate deterministic stream_id from provider and channel (for internal use)
                 stream_id = self._generate_stream_id(provider_name, channel_id)
 
                 # Store mapping for reverse lookup
@@ -438,8 +438,8 @@ class UltimateAdapter:
 
                 # Create channel object
                 channel = Channel(
-                    stream_id=stream_id,
-                    num=stream_id,  # Use same value for consistency
+                    stream_id=stream_id,  # Hash-based ID for internal lookups
+                    num=num_counter,  # Simple counter for display (1, 2, 3...)
                     name=channel_name,
                     stream_icon=channel_logo,
                     category_id=category_id,
@@ -451,6 +451,7 @@ class UltimateAdapter:
                 )
 
                 channels.append(channel)
+                num_counter += 1  # Increment display number
 
         except Exception as e:
             logger.error(f"Error fetching channels for {provider_name}: {e}")
@@ -473,6 +474,7 @@ class UltimateAdapter:
             return []
 
         all_channels = []
+        num_counter = 1  # Simple counter for channel numbers (1, 2, 3...)
 
         providers = self.cache["providers"]["data"]
 
@@ -502,7 +504,7 @@ class UltimateAdapter:
                     if channel_data.get("IsRadio", False):
                         continue
 
-                    # Generate deterministic stream_id
+                    # Generate deterministic stream_id (hash-based, for internal use)
                     stream_id = self._generate_stream_id(provider_name, channel_id)
 
                     # Store mapping
@@ -514,8 +516,8 @@ class UltimateAdapter:
 
                     # Create channel object
                     channel = Channel(
-                        stream_id=stream_id,
-                        num=stream_id,
+                        stream_id=stream_id,  # Hash-based ID for internal lookups
+                        num=num_counter,  # Simple counter for display (1, 2, 3...)
                         name=channel_name,
                         stream_icon=channel_logo,
                         category_id=str(provider_idx),
@@ -527,6 +529,7 @@ class UltimateAdapter:
                     )
 
                     all_channels.append(channel)
+                    num_counter += 1  # Increment display number
 
             except Exception as e:
                 logger.error(f"Error fetching channels for {provider_name}: {e}")
