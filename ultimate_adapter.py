@@ -125,7 +125,8 @@ class UltimateAdapter:
 
         logger.info(f"Ultimate Adapter initialized for backend: {ultimate_backend_url}")
 
-    def _generate_stream_id(self, provider_name: str, channel_id: str) -> int:
+    @staticmethod
+    def _generate_stream_id(provider_name: str, channel_id: str) -> int:
         """
         Generate a deterministic stream_id from provider name and channel ID.
 
