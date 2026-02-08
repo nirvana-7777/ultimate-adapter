@@ -780,8 +780,9 @@ class UltimateAdapter:
         """
         Get actual stream URL for a channel.
 
-        Now supports fast reconstruction from stream_id even if channel not in cache.
-        This is the key benefit of deterministic IDs.
+        FAST PATH: Uses mapping directly without loading all channels.
+        The mapping is built when channels are first requested (API calls),
+        so stream requests can just look it up.
         """
         # Verify authentication
         user = self.authenticate(username, password)
@@ -791,27 +792,43 @@ class UltimateAdapter:
             )
             return None
 
-        # Try to get from mapping first (faster - no channel lookup needed)
+        # Debug: Show mapping state
+        logger.debug(f"Mapping has {len(self.channel_map)} entries")
+
+        # Try to get from mapping first (FAST - no channel loading)
         mapping = self._parse_stream_id(stream_id)
         if mapping:
             provider_name, channel_id = mapping
             stream_url = self._build_stream_url(provider_name, channel_id)
             logger.info(
-                f"Built stream URL from mapping for stream {stream_id}: "
-                f"{provider_name}:{channel_id}"
+                f"Stream URL built from mapping (FAST PATH): stream={stream_id}, "
+                f"provider={provider_name}, channel={channel_id}"
             )
             return stream_url
 
-        # Fallback to channel lookup (slower but works if mapping not built yet)
-        channel = self.get_channel_by_id(stream_id)
-        if not channel:
-            logger.warning(
-                f"Stream URL request failed: channel {stream_id} not found for {username}"
-            )
-            return None
+        # Mapping not found - this means the client has a stream_id we don't know about
+        # This should rarely happen (only if cache was cleared after client got the list)
+        logger.warning(
+            f"Stream {stream_id} NOT in mapping ({len(self.channel_map)} entries). "
+            f"This should rarely happen - client may have stale data."
+        )
 
-        logger.info(f"Returning stream URL for channel {stream_id} to user {username}")
-        return channel.direct_source
+        # Last resort: try to find in cache without reloading
+        # Only check cached channels, don't trigger a full reload
+        cache_key = "channels"
+        if self.cache[cache_key]["data"]:
+            for channel in self.cache[cache_key]["data"]:
+                if channel.stream_id == stream_id:
+                    logger.info(
+                        f"Found stream {stream_id} in cached channels (CACHE HIT)"
+                    )
+                    return channel.direct_source
+
+        logger.error(
+            f"Stream URL request FAILED: channel {stream_id} not found in mapping "
+            f"or cache for user {username}"
+        )
+        return None
 
     def handle_api_request(self, action: str, params: Dict) -> Dict:
         """Handle API request and return appropriate response"""
