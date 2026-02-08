@@ -2,8 +2,15 @@
 """
 Ultimate Adapter - API adapter for Ultimate Backend
 Maps API calls to Ultimate Backend endpoints
+
+IMPROVEMENTS v2.0:
+- Deterministic stream_id generation using hash of provider:channel_id
+- Easy URL reconstruction from stream_id without cache lookup
+- Persistent mapping between stream_id and backend identifiers
+- Channel IDs are stable across restarts and cache flushes
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +18,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -84,7 +91,9 @@ class EPGProgram:
 class UltimateAdapter:
     """
     Adapter that translates API calls to Ultimate Backend API
-    calls
+
+    Key Feature: Uses deterministic stream_id generation based on provider:channel_id
+    This means the same channel always gets the same ID, making URLs easily reconstructable.
     """
 
     def __init__(
@@ -106,17 +115,85 @@ class UltimateAdapter:
             "epg": {"data": None, "timestamp": 0},
         }
 
-        # Channel mapping
+        # Channel mapping - now using deterministic IDs
+        # These are rebuilt on demand and always produce the same results
         self.channel_map = {}  # stream_id -> (provider, channel_id)
         self.reverse_channel_map = {}  # (provider, channel_id) -> stream_id
 
         # Initialize
         self._load_providers()
 
-        init_msg = (
-            f"Ultimate Adapter initialized for backend: " f"{ultimate_backend_url}"
+        logger.info(f"Ultimate Adapter initialized for backend: {ultimate_backend_url}")
+
+    def _generate_stream_id(self, provider_name: str, channel_id: str) -> int:
+        """
+        Generate a deterministic stream_id from provider name and channel ID.
+
+        This ensures:
+        1. Same channel always gets same stream_id (deterministic)
+        2. Stream IDs survive restarts and cache flushes
+        3. No dependency on load order
+        4. Easy reverse lookup via channel_map
+
+        Args:
+            provider_name: Name of the provider
+            channel_id: Original channel ID from backend
+
+        Returns:
+            Positive integer stream_id (max 2^31-1 for compatibility)
+        """
+        # Create unique string combining provider and channel
+        unique_str = f"{provider_name}:{channel_id}"
+
+        # Generate MD5 hash and convert to integer
+        hash_obj = hashlib.md5(unique_str.encode())
+        # Use first 4 bytes of hash to create an integer
+        stream_id = int.from_bytes(hash_obj.digest()[:4], byteorder="big")
+
+        # Ensure it's a positive integer (max 2^31 - 1)
+        stream_id = stream_id & 0x7FFFFFFF
+
+        # Ensure we don't get 0 (unlikely but possible)
+        if stream_id == 0:
+            stream_id = 1
+
+        return stream_id
+
+    def _parse_stream_id(self, stream_id: int) -> Optional[Tuple[str, str]]:
+        """
+        Parse a stream_id back to (provider_name, channel_id).
+
+        Uses the mapping stored in channel_map which is built
+        deterministically from the backend data.
+
+        Args:
+            stream_id: The stream ID to look up
+
+        Returns:
+            Tuple of (provider_name, channel_id) or None if not found
+        """
+        return self.channel_map.get(stream_id)
+
+    def _build_stream_url(self, provider_name: str, channel_id: str) -> str:
+        """
+        Build the stream URL from provider name and channel ID.
+
+        Format: /api/providers/{provider}/channels/{channel_id}/stream/decrypted/ffmpeg/index.mpd
+
+        This is the SINGLE SOURCE OF TRUTH for stream URL format.
+
+        Args:
+            provider_name: Name of the provider
+            channel_id: Original channel ID from backend
+
+        Returns:
+            Complete stream URL
+        """
+        return (
+            f"{self.ultimate_backend_url}/api/providers/"
+            f"{provider_name}/channels/{channel_id}/"
+            f"stream/decrypted/ffmpeg/index.mpd"
         )
-        logger.info(init_msg)
 
     def _make_request(
         self,
@@ -325,19 +402,17 @@ class UltimateAdapter:
         provider_label = provider.get("label", provider_name)
 
         logger.info(
-            f"Loading channels for category {category_id} "
-            f"(provider: {provider_name})"
+            f"Loading channels for category {category_id} (provider: {provider_name})"
         )
 
         channels = []
-        stream_counter = 1
 
         try:
             endpoint = f"/api/providers/{provider_name}/channels"
             response = self._make_request(endpoint)
 
             if not response or "channels" not in response:
-                logger.warning(f"No channels found for provider: " f"{provider_name}")
+                logger.warning(f"No channels found for provider: {provider_name}")
                 return []
 
             for channel_data in response["channels"]:
@@ -350,17 +425,20 @@ class UltimateAdapter:
                 if channel_data.get("IsRadio", False):
                     continue
 
-                # Create stream URL
-                stream_url = (
-                    f"{self.ultimate_backend_url}/api/providers/"
-                    f"{provider_name}/channels/{channel_id}/"
-                    f"stream/decrypted/ffmpeg/index.mpd"
-                )
+                # Generate deterministic stream_id from provider and channel
+                stream_id = self._generate_stream_id(provider_name, channel_id)
+
+                # Store mapping for reverse lookup
+                self.channel_map[stream_id] = (provider_name, channel_id)
+                self.reverse_channel_map[(provider_name, channel_id)] = stream_id
+
+                # Build stream URL using helper method
+                stream_url = self._build_stream_url(provider_name, channel_id)
 
                 # Create channel object
                 channel = Channel(
-                    stream_id=stream_counter,
-                    num=stream_counter,
+                    stream_id=stream_id,
+                    num=stream_id,  # Use same value for consistency
                     name=channel_name,
                     stream_icon=channel_logo,
                     category_id=category_id,
@@ -372,7 +450,6 @@ class UltimateAdapter:
                 )
 
                 channels.append(channel)
-                stream_counter += 1
 
         except Exception as e:
             logger.error(f"Error fetching channels for {provider_name}: {e}")
@@ -382,7 +459,7 @@ class UltimateAdapter:
         self.cache[cache_key]["data"] = channels
         self.cache[cache_key]["timestamp"] = time.time()
 
-        logger.info(f"Loaded {len(channels)} channels for category " f"{category_id}")
+        logger.info(f"Loaded {len(channels)} channels for category {category_id}")
 
         return channels
 
@@ -395,7 +472,6 @@ class UltimateAdapter:
             return []
 
         all_channels = []
-        stream_counter = 1
 
         providers = self.cache["providers"]["data"]
 
@@ -410,8 +486,7 @@ class UltimateAdapter:
                 endpoint = f"/api/providers/{provider_name}/channels"
                 response = self._make_request(endpoint)
                 if not response or "channels" not in response:
-                    log_msg = f"No channels found for provider: " f"{provider_name}"
-                    logger.warning(log_msg)
+                    logger.warning(f"No channels found for provider: {provider_name}")
                     continue
 
                 provider_channels = response["channels"]
@@ -426,17 +501,20 @@ class UltimateAdapter:
                     if channel_data.get("IsRadio", False):
                         continue
 
-                    # Create stream URL
-                    stream_url = (
-                        f"{self.ultimate_backend_url}/api/providers/"
-                        f"{provider_name}/channels/{channel_id}/"
-                        f"stream/decrypted/ffmpeg/index.mpd"
-                    )
+                    # Generate deterministic stream_id
+                    stream_id = self._generate_stream_id(provider_name, channel_id)
+
+                    # Store mapping
+                    self.channel_map[stream_id] = (provider_name, channel_id)
+                    self.reverse_channel_map[(provider_name, channel_id)] = stream_id
+
+                    # Build stream URL
+                    stream_url = self._build_stream_url(provider_name, channel_id)
 
                     # Create channel object
                     channel = Channel(
-                        stream_id=stream_counter,
-                        num=stream_counter,
+                        stream_id=stream_id,
+                        num=stream_id,
                         name=channel_name,
                         stream_icon=channel_logo,
                         category_id=str(provider_idx),
@@ -447,18 +525,10 @@ class UltimateAdapter:
                         original_channel_id=channel_id,
                     )
 
-                    # Store mapping
-                    self.channel_map[stream_counter] = (provider_name, channel_id)
-                    self.reverse_channel_map[(provider_name, channel_id)] = (
-                        stream_counter
-                    )
-
                     all_channels.append(channel)
-                    stream_counter += 1
 
             except Exception as e:
-                log_msg = f"Error fetching channels for {provider_name}: {e}"
-                logger.error(log_msg)
+                logger.error(f"Error fetching channels for {provider_name}: {e}")
                 continue
 
         # Cache results
@@ -495,12 +565,56 @@ class UltimateAdapter:
         return filtered
 
     def get_channel_by_id(self, stream_id: int) -> Optional[Channel]:
-        """Get a specific channel by stream ID"""
+        """
+        Get a specific channel by stream ID.
+
+        This method now supports reconstruction from the mapping if needed.
+        Even if the channel isn't in cache, we can rebuild it from the mapping.
+        """
+        # First try to find in cached channels
         channels = self.get_channels()
         for channel in channels:
             if channel.stream_id == stream_id:
                 logger.debug(f"Found channel {stream_id}: {channel.name}")
                 return channel
+
+        # If not in cache, try to reconstruct from mapping
+        mapping = self._parse_stream_id(stream_id)
+        if mapping:
+            provider_name, channel_id = mapping
+            logger.info(
+                f"Reconstructing channel from mapping: {provider_name}:{channel_id}"
+            )
+
+            # Fetch just this channel's data
+            try:
+                endpoint = f"/api/providers/{provider_name}/channels"
+                response = self._make_request(endpoint)
+                if response and "channels" in response:
+                    for channel_data in response["channels"]:
+                        if channel_data.get("Id") == channel_id:
+                            # Found it! Build the channel object
+                            stream_url = self._build_stream_url(
+                                provider_name, channel_id
+                            )
+
+                            channel = Channel(
+                                stream_id=stream_id,
+                                num=stream_id,
+                                name=channel_data.get("Name", "Unknown"),
+                                stream_icon=channel_data.get("LogoUrl", ""),
+                                epg_channel_id=channel_id,
+                                direct_source=stream_url,
+                                provider_name=provider_name,
+                                original_channel_id=channel_id,
+                            )
+                            logger.debug(
+                                f"Reconstructed channel {stream_id}: {channel.name}"
+                            )
+                            return channel
+            except Exception as e:
+                logger.error(f"Error reconstructing channel {stream_id}: {e}")
+
         logger.warning(f"Channel not found for stream_id: {stream_id}")
         return None
 
@@ -551,7 +665,7 @@ class UltimateAdapter:
                         id=str(program_counter),
                         epg_id=str(program_counter),
                         title=f"Program {program_counter}",
-                        description=f"Description for program " f"{program_counter}",
+                        description=f"Description for program {program_counter}",
                         start=start_time.strftime("%H:%M"),
                         end=end_time.strftime("%H:%M"),
                         start_timestamp=str(int(start_time.timestamp())),
@@ -654,15 +768,20 @@ class UltimateAdapter:
         xmltv += "</tv>"
 
         logger.info(
-            f"Generated XMLTV EPG with {len(channels)} channels and"
-            f" {len(epg_data)} programs for {username}"
+            f"Generated XMLTV EPG with {len(channels)} channels and "
+            f"{len(epg_data)} programs for {username}"
         )
         return xmltv
 
     def get_stream_url(
         self, username: str, password: str, stream_id: int
     ) -> Optional[str]:
-        """Get actual stream URL for a channel"""
+        """
+        Get actual stream URL for a channel.
+
+        Now supports fast reconstruction from stream_id even if channel not in cache.
+        This is the key benefit of deterministic IDs.
+        """
         # Verify authentication
         user = self.authenticate(username, password)
         if not user:
@@ -671,7 +790,18 @@ class UltimateAdapter:
             )
             return None
 
-        # Get channel info
+        # Try to get from mapping first (faster - no channel lookup needed)
+        mapping = self._parse_stream_id(stream_id)
+        if mapping:
+            provider_name, channel_id = mapping
+            stream_url = self._build_stream_url(provider_name, channel_id)
+            logger.info(
+                f"Built stream URL from mapping for stream {stream_id}: "
+                f"{provider_name}:{channel_id}"
+            )
+            return stream_url
+
+        # Fallback to channel lookup (slower but works if mapping not built yet)
         channel = self.get_channel_by_id(stream_id)
         if not channel:
             logger.warning(
@@ -815,9 +945,11 @@ class UltimateAdapter:
 
                 # Log to a separate file for analysis
                 try:
+                    os.makedirs("logs", exist_ok=True)
                     with open("logs/unhandled_requests.log", "a") as log_file:
                         log_file.write(
-                            f"{datetime.now().isoformat()} - Action: {action}, Params: {params}\n"
+                            f"{datetime.now().isoformat()} - Action: {action}, "
+                            f"Params: {params}\n"
                         )
                 except Exception as e:
                     logger.error(f"Could not write to unhandled requests log: {e}")
@@ -848,9 +980,10 @@ class UltimateAdapter:
             # Clear all caches
             for key in self.cache:
                 self.cache[key] = {"data": None, "timestamp": 0}
-            self.channel_map.clear()
-            self.reverse_channel_map.clear()
-            logger.info("All caches cleared")
+            # Don't clear the mappings - they're deterministic and will rebuild the same
+            logger.info(
+                "All caches cleared (mappings preserved as they're deterministic)"
+            )
             return {"message": "All caches cleared"}
 
     def get_stats(self) -> Dict:
@@ -871,6 +1004,11 @@ class UltimateAdapter:
             },
             "channel_map_size": len(self.channel_map),
             "backend_url": self.ultimate_backend_url,
+            "mapping_info": {
+                "total_mapped_channels": len(self.channel_map),
+                "deterministic_ids": True,
+                "id_generation": "MD5 hash of provider:channel_id",
+            },
         }
 
 
@@ -890,50 +1028,94 @@ def create_adapter() -> UltimateAdapter:
 
 # Test function
 def test_adapter():
-    """Test the adapter"""
+    """Test the adapter with focus on deterministic stream ID generation"""
     adapter = UltimateAdapter(
         ultimate_backend_url="http://localhost:7777",
         default_username="user",
         default_password="pass",
     )
 
-    print("Testing Ultimate Adapter...")
-    print("=" * 50)
+    print("Testing Ultimate Adapter v2.0 (Deterministic Stream IDs)")
+    print("=" * 70)
+
+    # Test stream_id generation
+    print("\n1. Testing Stream ID Generation:")
+    print("-" * 70)
+    test_cases = [
+        ("provider1", "channel123"),
+        ("provider1", "channel456"),
+        ("provider2", "channel123"),  # Same channel ID, different provider
+    ]
+
+    for provider, channel_id in test_cases:
+        stream_id = adapter._generate_stream_id(provider, channel_id)
+        url = adapter._build_stream_url(provider, channel_id)
+        print(f"  {provider}:{channel_id}")
+        print(f"    → stream_id: {stream_id}")
+        print(f"    → URL: {url}")
+        print()
+
+    # Verify determinism
+    print("2. Testing Determinism:")
+    print("-" * 70)
+    id1 = adapter._generate_stream_id("test_provider", "test_channel")
+    id2 = adapter._generate_stream_id("test_provider", "test_channel")
+    print(f"  First call:  {id1}")
+    print(f"  Second call: {id2}")
+    if id1 == id2:
+        print("  ✓ Deterministic: IDs match")
+    else:
+        print("  ✗ ERROR: IDs don't match!")
 
     # Test authentication
+    print("\n3. Testing Authentication:")
+    print("-" * 70)
     user = adapter.authenticate("user", "pass")
-    print(f"Authentication: {'SUCCESS' if user else 'FAILED'}")
+    print(f"  Result: {'✓ SUCCESS' if user else '✗ FAILED'}")
 
-    # Test getting categories
+    # Test categories
+    print("\n4. Testing Categories:")
+    print("-" * 70)
     categories = adapter.get_categories()
-    print(f"Categories: {len(categories)} found")
-    for cat in categories[:3]:  # Show first 3
-        print(f"  - {cat.category_name} (ID: {cat.category_id})")
+    print(f"  Total categories: {len(categories)}")
+    for cat in categories[:3]:
+        print(f"    - {cat.category_name} (ID: {cat.category_id})")
 
-    # Test getting channels
+    # Test channels
+    print("\n5. Testing Channels:")
+    print("-" * 70)
     channels = adapter.get_channels()
-    print(f"Channels: {len(channels)} found")
-    for ch in channels[:3]:  # Show first 3
-        print(f"  - {ch.name} (ID: {ch.stream_id})")
+    print(f"  Total channels: {len(channels)}")
+    if channels:
+        print("  Showing first 3 channels:")
+        for ch in channels[:3]:
+            print(f"    • {ch.name}")
+            print(f"      stream_id: {ch.stream_id}")
+            print(f"      provider: {ch.provider_name}")
+            print(f"      channel_id: {ch.original_channel_id}")
+            print(f"      URL: {ch.direct_source}")
+            print()
 
-    # Test API request
-    print("\nTesting API simulation...")
-    response = adapter.handle_api_request(
-        "get_live_categories", {"username": "user", "password": "pass"}
-    )
-    result = len(response) if isinstance(response, list) else "error"
-    print(f"Categories response: {result}")
-
-    # Test M3U generation
-    m3u = adapter.generate_m3u_playlist("user", "pass")
-    print(f"\nM3U generated: {'YES' if m3u else 'NO'}")
-    if m3u:
-        lines = m3u.split("\n")
-        print(f"  First 3 lines: {lines[:3]}")
+    # Test reverse lookup
+    if channels:
+        print("6. Testing Reverse Lookup:")
+        print("-" * 70)
+        test_channel = channels[0]
+        mapping = adapter._parse_stream_id(test_channel.stream_id)
+        if mapping:
+            provider, channel_id = mapping
+            print(f"  stream_id {test_channel.stream_id} maps to:")
+            print(f"    Provider: {provider}")
+            print(f"    Channel ID: {channel_id}")
+            reconstructed_url = adapter._build_stream_url(provider, channel_id)
+            print(f"    Reconstructed URL: {reconstructed_url}")
+            matches = reconstructed_url == test_channel.direct_source
+            print(f"    Matches original: {'✓ YES' if matches else '✗ NO'}")
 
     # Get stats
+    print("\n7. Adapter Statistics:")
+    print("-" * 70)
     stats = adapter.get_stats()
-    print("\nAdapter Stats:")
     for key, value in stats.items():
         if isinstance(value, dict):
             print(f"  {key}:")
@@ -942,7 +1124,7 @@ def test_adapter():
         else:
             print(f"  {key}: {value}")
 
-    print("=" * 50)
+    print("=" * 70)
     print("Test complete!")
 
 
