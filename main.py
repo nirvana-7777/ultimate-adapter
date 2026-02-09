@@ -121,8 +121,10 @@ def initialize_adapter():
         logger.error("✗ FAILED: Channel mapping could not be built on startup!")
         logger.error("  Stream requests will fail until mapping is built via API calls")
     else:
-        logger.info(f"✓ Startup complete for worker PID {os.getpid()}. "
-                    f"Stream requests will use FAST PATH")
+        logger.info(
+            f"✓ Startup complete for worker PID {os.getpid()}. "
+            f"Stream requests will use FAST PATH"
+        )
 
 
 # Initialize adapter when module is loaded (runs for each Gunicorn worker)
