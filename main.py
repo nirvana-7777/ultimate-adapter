@@ -573,27 +573,58 @@ def internal_error(error):
     return jsonify({"error": "Internal server error", "request_id": request_id}), 500
 
 
+# Replace the current startup code with this:
 if __name__ == "__main__":
     logger.info(f"Starting Ultimate Adapter on port {SERVER_PORT}")
     logger.info(f"Backend URL: {adapter.ultimate_backend_url}")
     default_creds = f"{adapter.default_username}/{adapter.default_password}"
     logger.info(f"Default credentials: {default_creds}")
 
-    # Initial cache load
-    logger.info("Loading initial data...")
-    adapter._load_providers()
+    # Initial cache load with retry
+    max_retries = 3
+    for attempt in range(max_retries):
+        logger.info(f"Loading initial data (attempt {attempt + 1}/{max_retries})...")
 
-    # CRITICAL: Pre-build channel mapping for instant stream lookups
-    # This prevents the 7+ second delay when streams are requested
-    logger.info("Building channel mapping (this may take a moment)...")
-    channels = adapter.get_channels()
-    mapping_size = len(adapter.channel_map)
+        # Load providers first
+        if adapter._load_providers():
+            # CRITICAL: Pre-build channel mapping for instant stream lookups
+            logger.info("Building channel mapping (this may take a moment)...")
+            channels = adapter.get_channels()
+            mapping_size = len(adapter.channel_map)
 
-    if mapping_size > 0:
-        logger.info(f"✓ Channel mapping ready with {mapping_size} entries")
-        logger.info("  Stream requests will use FAST PATH (no backend reload)")
+            if mapping_size > 0:
+                logger.info(f"✓ Channel mapping ready with {mapping_size} entries")
+
+                # Verify mapping contains some channels
+                if channels:
+                    logger.info(f"✓ Loaded {len(channels)} channels")
+
+                    # Log sample of mapping for debugging
+                    sample_count = min(5, len(adapter.channel_map))
+                    logger.info(f"✓ Sample mappings (first {sample_count}):")
+                    for i, (stream_id, mapping) in enumerate(
+                        list(adapter.channel_map.items())[:sample_count]
+                    ):
+                        provider, channel_id = mapping
+                        logger.info(f"  {stream_id} -> {provider}:{channel_id}")
+
+                    break  # Success!
+                else:
+                    logger.warning("⚠ Channels loaded but mapping empty. Retrying...")
+            else:
+                logger.warning("⚠ Channel mapping is empty. Retrying...")
+        else:
+            logger.warning("⚠ Failed to load providers. Retrying...")
+
+        if attempt < max_retries - 1:
+            import time
+
+            time.sleep(2)  # Wait before retry
+
+    if len(adapter.channel_map) == 0:
+        logger.error("✗ FAILED: Channel mapping could not be built on startup!")
+        logger.error("  Stream requests will fail until mapping is built via API calls")
     else:
-        logger.warning("⚠ Channel mapping is empty - stream requests will be slow")
-        logger.warning("  This may happen if backend is unreachable")
+        logger.info("✓ Startup complete. Stream requests will use FAST PATH")
 
     app.run(host="0.0.0.0", port=SERVER_PORT, debug=DEBUG_MODE)
